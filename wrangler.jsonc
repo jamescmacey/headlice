@@ -7,17 +7,32 @@
 	"name": "headlice",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-06-04",
+	"workers_dev": false,
+	"preview_urls": false,
 	"observability": {
 		"enabled": true
 	},
 	"triggers": {
 		"crons": [
-			"* * * * *"
+			"0,30 * * * *"
 		]
 	},
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
+	],
+	"d1_databases": [
+		{
+			"binding": "HEADLICE",
+			"database_name": "headlice",
+			"database_id": "6cc97d0d-02c2-457d-8fde-50020341209b"
+		}
+	],
+	"routes": [
+		{
+			"pattern": "headlice.jamescmacey.com",
+			"custom_domain": true,
+		}
 	]
 	/**
 	 * Smart Placement

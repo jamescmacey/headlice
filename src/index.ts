@@ -1,40 +1,81 @@
-/**
- * Welcome to Cloudflare Workers!
- *
- * This is a template for a Scheduled Worker: a Worker that can run on a
- * configurable interval:
- * https://developers.cloudflare.com/workers/platform/triggers/cron-triggers/
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Run `curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"` to see your Worker in action
- * - Run `npm run deploy` to publish your Worker
- *
- * Bind resources to your Worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import { getRandomRecord, insertRecord } from './records';
+import { scrapeRnz } from './scrapers/rnz';
+
+function isAllowedOrigin(origin: string | null): origin is string {
+	if (!origin) return false;
+	try {
+		const host = new URL(origin).hostname.toLowerCase();
+		return (
+			host === 'jamescmacey.com' ||
+			host === 'macey.nz' ||
+			host.endsWith('.jamescmacey.com') ||
+			host.endsWith('.macey.nz')
+		);
+	} catch {
+		return false;
+	}
+}
+
+function corsHeaders(origin: string): HeadersInit {
+	return {
+		'Access-Control-Allow-Origin': origin,
+		'Access-Control-Allow-Methods': 'GET, OPTIONS',
+		'Access-Control-Allow-Headers': 'Content-Type',
+		Vary: 'Origin',
+	};
+}
+
+function withCors(response: Response, origin: string | null): Response {
+	if (!isAllowedOrigin(origin)) {
+		return response;
+	}
+
+	const headers = new Headers(response.headers);
+	for (const [key, value] of Object.entries(corsHeaders(origin))) {
+		headers.set(key, value);
+	}
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
 
 export default {
-	async fetch(req) {
-		const url = new URL(req.url);
-		url.pathname = '/__scheduled';
-		url.searchParams.append('cron', '* * * * *');
-		return new Response(`To test the scheduled handler, ensure you have used the "--test-scheduled" then try running "curl ${url.href}".`);
+	async fetch(req, env) {
+		const origin = req.headers.get('Origin');
+
+		if (req.method === 'OPTIONS') {
+			if (!isAllowedOrigin(origin)) {
+				return new Response(null, { status: 403 });
+			}
+			return new Response(null, { status: 204, headers: corsHeaders(origin) });
+		}
+
+		const record = await getRandomRecord(env.HEADLICE);
+		if (!record) {
+			return withCors(new Response('No records found', { status: 404 }), origin);
+		}
+		return withCors(Response.json(record), origin);
 	},
 
-	// The scheduled handler is invoked at the interval set in our wrangler.jsonc's
-	// [[triggers]] configuration.
-	async scheduled(event, env, ctx): Promise<void> {
-		// A Cron Trigger can make requests to other endpoints on the Internet,
-		// publish to a Queue, query a D1 Database, and much more.
-		//
-		// We'll keep it simple and make an API call to a Cloudflare API:
-		let resp = await fetch('https://api.cloudflare.com/client/v4/ips');
-		let wasSuccessful = resp.ok ? 'success' : 'fail';
+	async scheduled(event, env): Promise<void> {
+		try {
+			const record = await scrapeRnz();
+			if (!record) {
+				console.error(`cron ${event.cron}: RNZ scrape failed`);
+				await fetch(env.HEARTBEAT_URL + '/fail')
+				return;
+			}
 
-		// You could store this result in KV, write to a D1 Database, or publish to a Queue.
-		// In this template, we'll just log the result:
-		console.log(`trigger fired at ${event.cron}: ${wasSuccessful}`);
+			await insertRecord(env.HEADLICE, record);
+			console.log(
+				`cron ${event.cron}: saved RNZ headline "${record.headline}"`,
+			);
+			await fetch(env.HEARTBEAT_URL)
+		} catch (err) {
+			console.error(`cron ${event.cron}:`, err);
+			await fetch(env.HEARTBEAT_URL + '/fail')
+		}
 	},
 } satisfies ExportedHandler<Env>;
