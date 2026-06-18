@@ -1,8 +1,7 @@
 import type { NewRecord } from '../records';
 
 const BASE_URL = 'https://www.rnz.co.nz';
-const LEAD_CLASSES = ['lead-story--standard', 'lead-story--defcon'] as const;
-const TOP_STORIES_MARKER = '<ul class="c-top-stories__list">';
+const TOP_STORIES_MARKER = '<h2 class="sr-only">Top stories</h2>';
 
 function decodeHtmlEntities(text: string): string {
 	const named: Record<string, string> = {
@@ -31,41 +30,63 @@ function htmlText(raw: string): string {
 		.trim();
 }
 
-function extractLeadBlock(html: string, className: string): string | null {
-	const marker = html.indexOf(className);
+function extractLeadArticle(html: string): string | null {
+	const marker = html.indexOf(TOP_STORIES_MARKER);
 	if (marker === -1) return null;
 
-	const divStart = html.lastIndexOf('<div', marker);
-	const end = html.indexOf(TOP_STORIES_MARKER, marker);
-	if (divStart === -1 || end === -1) return null;
+	const articleStart = html.indexOf('<article', marker);
+	const articleEnd = html.indexOf('</article>', articleStart);
+	if (articleStart === -1 || articleEnd === -1) return null;
 
-	return html.slice(divStart, end);
+	return html.slice(articleStart, articleEnd + '</article>'.length);
 }
 
 function resolveUrl(baseUrl: string, href: string): string {
 	return new URL(href, baseUrl).href;
 }
 
-function parseLeadBlock(block: string, baseUrl: string): Omit<NewRecord, 'site' | 'retrieved'> {
-	const imgMatch = block.match(/<img[^>]+src="([^"]+)"/);
-	const linkMatch = block.match(/<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
-	const summaryMatch = block.match(
-		/<div class="o-digest__summary">\s*<p[^>]*>([\s\S]*?)<\/p>/,
+function parseLeadArticle(
+	block: string,
+	baseUrl: string,
+): Pick<NewRecord, 'story_url' | 'headline' | 'image_url'> {
+	const linkMatch = block.match(
+		/<h3[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/,
 	);
+	const imgMatch = block.match(/<img[^>]+src="([^"]+)"/);
 
 	if (!linkMatch) {
 		throw new Error('RNZ lead story is missing a link');
-	}
-	if (!summaryMatch) {
-		throw new Error('RNZ lead story is missing a summary');
 	}
 
 	return {
 		story_url: resolveUrl(baseUrl, linkMatch[1]!),
 		headline: htmlText(linkMatch[2]!),
-		summary: htmlText(summaryMatch[1]!),
 		image_url: imgMatch ? resolveUrl(baseUrl, imgMatch[1]!) : null,
 	};
+}
+
+function parseMetaDescription(html: string): string | null {
+	const match =
+		html.match(/<meta[^>]+name="description"[^>]+content="([^"]+)"/) ??
+		html.match(/<meta[^>]+content="([^"]+)"[^>]+name="description"/) ??
+		html.match(/<meta[^>]+property="og:description"[^>]+content="([^"]+)"/) ??
+		html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:description"/);
+
+	return match ? htmlText(match[1]!) : null;
+}
+
+async function fetchSummary(storyUrl: string): Promise<string> {
+	const response = await fetch(storyUrl);
+	if (!response.ok) {
+		throw new Error(`RNZ article fetch failed (${response.status})`);
+	}
+
+	const summary = parseMetaDescription(await response.text());
+	if (!summary) {
+		throw new Error('RNZ article is missing a summary');
+	}
+
+	return summary;
 }
 
 export async function scrapeRnz(): Promise<NewRecord | null> {
@@ -75,17 +96,16 @@ export async function scrapeRnz(): Promise<NewRecord | null> {
 	}
 
 	const html = await response.text();
-	const leadBlock =
-		LEAD_CLASSES.map((className) => extractLeadBlock(html, className)).find(
-			Boolean,
-		) ?? null;
-
-	if (!leadBlock) {
+	const leadArticle = extractLeadArticle(html);
+	if (!leadArticle) {
 		return null;
 	}
 
+	const lead = parseLeadArticle(leadArticle, BASE_URL);
+
 	return {
-		...parseLeadBlock(leadBlock, BASE_URL),
+		...lead,
+		summary: await fetchSummary(lead.story_url),
 		site: 'rnz',
 		retrieved: new Date().toISOString(),
 	};
